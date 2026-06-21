@@ -1,0 +1,37 @@
+name: Docker
+description: Docker container images and build caches
+detectors: []
+global_items:
+  - name: Docker VM Disk
+    paths:
+      - ~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw
+    safe: false
+    delete: directory
+    explanation: |
+      Docker's virtual machine disk image. macOS shows ~460 GB allocated but
+      actual used space is ~11 GB — it is a sparse file. Do NOT delete this.
+      Use the command action below to reclaim space inside Docker instead.
+  - name: Docker Build Cache
+    paths:
+      - ~/Library/Caches/com.docker.docker
+    safe: true
+    delete: directory
+    explanation: |
+      Docker build layer cache. Safe to delete. Equivalent to: docker builder prune
+command_items:
+  - name: Prune unused Docker data
+    command: docker system prune -f
+    description: Removes stopped containers, dangling images, unused networks, and build cache.
+    safe: true
+    explanation: |
+      Equivalent to `docker system prune -f`. This does NOT remove named volumes
+      or images still in use. Run `docker system prune -a` to also remove
+      all images not used by any container.
+  - name: Prune all images + cache
+    command: docker system prune -af
+    description: Removes ALL unused images (not just dangling) plus build cache.
+    safe: false
+    explanation: |
+      `docker system prune -af` removes all unused images, containers, networks,
+      and build cache. You will need to re-pull any images you want to use again.
+project_items: []

@@ -1,0 +1,63 @@
+name: React Native
+description: React Native framework caches
+# Detectors: ANY of these combos identifies a React Native project.
+# We use `any_detectors` (at least one from the list must match) combined with package.json.
+detectors:
+  - "package.json"
+detectors_any:
+  - "ios"
+  - "android"
+global_items:
+  - name: Metro Bundler Cache
+    paths:
+      - /tmp/metro-cache
+      - /tmp/haste-map-metro-bundler
+    safe: true
+    delete: directory
+    explanation: |
+      Metro bundler cache. Safe to delete — rebuilt on next `npx react-native start`.
+project_items:
+  - name: node_modules
+    paths:
+      - node_modules
+    safe: true
+    delete: directory
+    explanation: |
+      Can be restored via yarn/npm install.
+  - name: Pods
+    paths:
+      - ios/Pods
+    safe: true
+    delete: directory
+    explanation: |
+      iOS CocoaPods dependencies. Restored via `pod install`.
+  - name: iOS Build
+    paths:
+      - ios/build
+      - ios/DerivedData
+    safe: true
+    delete: directory
+    explanation: |
+      iOS build artifacts. Rebuilt automatically on next compilation.
+  - name: Android app/build
+    paths:
+      - android/app/build
+    safe: true
+    delete: directory
+    explanation: |
+      Android app module build artifacts. Rebuilt on next compile.
+  - name: Android root/build
+    paths:
+      - android/build
+    safe: true
+    delete: directory
+    explanation: |
+      Android root project build directory. Safe to delete.
+  - name: Android .gradle
+    paths:
+      - android/.gradle
+    safe: true
+    delete: directory
+    explanation: |
+      Android local Gradle cache. Rebuilt on next build.
+

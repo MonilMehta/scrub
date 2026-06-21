@@ -1,0 +1,28 @@
+name: CocoaPods
+description: CocoaPods dependency manager caches
+detectors: []
+global_items:
+  - name: CocoaPods Cache
+    paths:
+      - ~/Library/Caches/CocoaPods
+    safe: true
+    delete: directory
+    explanation: |
+      CocoaPods local pod cache (1.3 GB). Safe to delete — pods are re-downloaded
+      when you run `pod install`.
+  - name: CocoaPods Repos
+    paths:
+      - ~/.cocoapods
+    safe: true
+    delete: directory
+    explanation: |
+      CocoaPods specs repo. Safe to delete — will be re-cloned when needed.
+project_items:
+  - name: Pods
+    paths:
+      - ios/Pods
+      - Pods
+    safe: true
+    delete: directory
+    explanation: |
+      Project-local CocoaPods dependencies. Restored via `pod install`.

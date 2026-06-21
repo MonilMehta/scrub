@@ -1,0 +1,79 @@
+name: Android
+description: Android Studio, Gradle, and AVD caches
+detectors: []
+global_items:
+  - name: Gradle Caches
+    paths:
+      - ~/.gradle/caches
+    safe: true
+    delete: directory
+    explanation: |
+      Gradle dependency cache. Safe to delete — Gradle re-downloads on next build.
+  - name: Gradle Daemon
+    paths:
+      - ~/.gradle/daemon
+    safe: true
+    delete: directory
+    explanation: |
+      Gradle daemon logs and state. Safe to delete.
+  - name: Gradle Wrapper
+    paths:
+      - ~/.gradle/wrapper/dists
+    safe: true
+    delete: directory
+    explanation: |
+      Cached Gradle distribution zips. Will be re-downloaded when you next build.
+  - name: Android AVD
+    paths:
+      - ~/.android/avd
+    safe: false
+    delete: directory
+    scan_children: true
+    explanation: |
+      Android Virtual Device. Deleting removes the emulator's disk image and configuration.
+      Only delete emulators you no longer use.
+  - name: Android Cache
+    paths:
+      - ~/.android/cache
+    safe: true
+    delete: directory
+    explanation: |
+      Android tooling cache. Safe to delete.
+  - name: Android SDK
+    paths:
+      - ~/Library/Android/sdk
+    safe: false
+    delete: directory
+    explanation: |
+      The full Android SDK installation (~26 GB). Do not delete unless you are
+      fully uninstalling Android development. Use Android Studio's SDK Manager
+      to remove individual platforms or build tools instead.
+command_items:
+  - name: Prune Gradle Caches (safe)
+    command: "find ~/.gradle/caches -mindepth 1 -maxdepth 1 -type d | sort"
+    description: Lists Gradle cache modules available for targeted removal.
+    safe: true
+    explanation: |
+      Runs `./gradlew clean` in a project to remove only that project's build output.
+project_items:
+  - name: Android app/build
+    paths:
+      - android/app/build
+    safe: true
+    delete: directory
+    explanation: |
+      Android app module build artifacts. Rebuilt on next compile.
+  - name: Android root/build
+    paths:
+      - android/build
+    safe: true
+    delete: directory
+    explanation: |
+      Android root project build directory. Safe to delete.
+  - name: Android .gradle
+    paths:
+      - android/.gradle
+    safe: true
+    delete: directory
+    explanation: |
+      Android local Gradle cache. Rebuilt on next build.

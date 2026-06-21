@@ -1,0 +1,13 @@
+name: Homebrew
+description: Homebrew package manager caches
+detectors: []
+global_items:
+  - name: Homebrew Cache
+    paths:
+      - ~/Library/Caches/Homebrew
+    safe: true
+    delete: directory
+    explanation: |
+      Homebrew downloaded package cache (971 MB). Safe to delete — run
+      `brew cleanup` for a safe targeted cleanup, or delete entirely.
+project_items: []

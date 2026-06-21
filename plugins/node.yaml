@@ -1,0 +1,47 @@
+name: Node
+description: Node.js and npm caches
+detectors:
+  - "package.json"
+detectors_any: []
+# NOTE: node_modules is intentionally NOT listed here for generic Node projects.
+# More specific plugins (React Native, Expo, Next.js) include node_modules when
+# they detect their own projects, avoiding double-counting. For generic JS/TS
+# projects without a known framework, node_modules IS included below.
+global_items:
+  - name: npm Cache
+    paths:
+      - ~/.npm
+    safe: true
+    delete: directory
+    explanation: |
+      npm global package cache (3.24 GB). Safe to delete — npm re-downloads packages as needed.
+  - name: node-gyp Cache
+    paths:
+      - ~/Library/Caches/node-gyp
+    safe: true
+    delete: directory
+    explanation: |
+      node-gyp native addon build cache (64 MB). Safe to delete.
+  - name: TypeScript Cache
+    paths:
+      - ~/Library/Caches/typescript
+    safe: true
+    delete: directory
+    explanation: |
+      TypeScript language server cache (254 MB). Safe to delete — rebuilt on next IDE open.
+project_items:
+  - name: node_modules
+    paths:
+      - node_modules
+    safe: true
+    delete: directory
+    explanation: |
+      Project dependencies. Restored via `npm install` or `yarn install`.
+  - name: dist / build
+    paths:
+      - dist
+      - build
+    safe: true
+    delete: directory
+    explanation: |
+      Build output directory. Regenerated via your build script.

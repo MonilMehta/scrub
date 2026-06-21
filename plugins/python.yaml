@@ -1,0 +1,36 @@
+name: Python
+description: Python pip caches
+detectors: []
+global_items:
+  - name: pip Cache
+    paths:
+      - ~/Library/Caches/pip
+    safe: true
+    delete: directory
+    explanation: |
+      pip package download cache (121 MB). Safe to delete — pip re-downloads
+      packages as needed.
+project_items:
+  - name: venv
+    paths:
+      - venv
+      - .venv
+      - env
+    safe: true
+    delete: directory
+    explanation: |
+      Python virtual environment. Restored via `python -m venv venv && pip install -r requirements.txt`.
+  - name: __pycache__
+    paths:
+      - __pycache__
+    safe: true
+    delete: directory
+    explanation: |
+      Python bytecode cache. Automatically regenerated.
+  - name: dist
+    paths:
+      - dist
+    safe: true
+    delete: directory
+    explanation: |
+      Python build output. Regenerated via build tooling.

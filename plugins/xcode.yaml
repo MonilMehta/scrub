@@ -1,0 +1,35 @@
+name: Xcode
+description: Apple Xcode caches
+detectors:
+  - "*.xcodeproj"
+  - "*.xcworkspace"
+global_items:
+  - name: DerivedData
+    paths:
+      - ~/Library/Developer/Xcode/DerivedData
+    safe: true
+    delete: directory
+    explanation: |
+      Xcode recreates DerivedData automatically.
+  - name: Archives
+    paths:
+      - ~/Library/Developer/Xcode/Archives
+    safe: true
+    delete: directory
+    explanation: |
+      Old build archives that can be safely deleted.
+  - name: DeviceSupport
+    paths:
+      - ~/Library/Developer/Xcode/iOS DeviceSupport
+    safe: true
+    delete: directory
+    explanation: |
+      Stores debugging symbols for connected iOS devices. Safe to delete. Xcode downloads them again when needed.
+project_items:
+  - name: xcuserdata
+    paths:
+      - "xcuserdata"
+    safe: true
+    delete: directory
+    explanation: |
+      User-specific IDE state.

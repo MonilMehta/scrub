@@ -1,0 +1,20 @@
+name: Yarn
+description: Yarn package manager caches
+detectors: []
+global_items:
+  - name: Yarn Cache
+    paths:
+      - ~/Library/Caches/Yarn
+    safe: true
+    delete: directory
+    explanation: |
+      Yarn global package cache (4.5 GB). Safe to delete — packages are
+      re-downloaded when you install dependencies.
+project_items:
+  - name: node_modules
+    paths:
+      - node_modules
+    safe: true
+    delete: directory
+    explanation: |
+      Project dependencies. Restored via `yarn install`.

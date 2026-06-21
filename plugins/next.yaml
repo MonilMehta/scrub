@@ -1,0 +1,31 @@
+name: Next.js
+description: Next.js application caches
+detectors:
+  - "package.json"
+detectors_any:
+  - "next.config.js"
+  - "next.config.mjs"
+  - "next.config.ts"
+global_items:
+  - name: next-swc Cache
+    paths:
+      - ~/Library/Caches/next-swc
+    safe: true
+    delete: directory
+    explanation: |
+      Next.js SWC compiler cache (39 MB). Safe to delete — rebuilt automatically.
+project_items:
+  - name: .next build
+    paths:
+      - .next
+    safe: true
+    delete: directory
+    explanation: |
+      Next.js build output. Safe to delete — rebuilt with `next build` or `next dev`.
+  - name: node_modules
+    paths:
+      - node_modules
+    safe: true
+    delete: directory
+    explanation: |
+      Can be restored via yarn/npm install.

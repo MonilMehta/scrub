@@ -1,0 +1,21 @@
+name: iOS Simulator
+description: Xcode iOS Simulator devices and caches
+detectors: []
+global_items:
+  - name: Simulator Devices
+    paths:
+      - ~/Library/Developer/CoreSimulator/Devices
+    safe: true
+    delete: directory
+    explanation: |
+      All iOS Simulator device images. 13 GB on your machine. Safe to delete —
+      Xcode recreates simulator devices on demand. You will lose simulator app
+      data and any emulator state.
+  - name: Simulator Caches
+    paths:
+      - ~/Library/Developer/CoreSimulator/Caches
+    safe: true
+    delete: directory
+    explanation: |
+      CoreSimulator runtime caches. Safe to delete.
+project_items: []

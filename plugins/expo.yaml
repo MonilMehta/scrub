@@ -1,0 +1,51 @@
+name: Expo
+description: Expo application caches
+detectors:
+  - "package.json"
+  - "app.json"
+global_items:
+  - name: Expo CLI Cache
+    paths:
+      - ~/.expo
+    safe: true
+    delete: directory
+    explanation: |
+      Expo CLI global cache. Safe to delete.
+project_items:
+  - name: node_modules
+    paths:
+      - node_modules
+    safe: true
+    delete: directory
+    explanation: |
+      Can be restored via yarn/npm install.
+  - name: Expo cache
+    paths:
+      - .expo
+    safe: true
+    delete: directory
+    explanation: |
+      Expo project-local cache. Rebuilt on next `npx expo start`.
+  - name: Android Build
+    paths:
+      - android/app/build
+      - android/build
+      - android/.gradle
+    safe: true
+    delete: directory
+    explanation: |
+      Android build artifacts. Rebuilt automatically on next compilation.
+  - name: iOS Build
+    paths:
+      - ios/build
+    safe: true
+    delete: directory
+    explanation: |
+      iOS build artifacts. Rebuilt automatically on next compilation.
+  - name: Pods
+    paths:
+      - ios/Pods
+    safe: true
+    delete: directory
+    explanation: |
+      iOS CocoaPods. Restored via `pod install`.
