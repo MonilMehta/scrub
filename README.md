@@ -23,12 +23,25 @@ Think: `lazygit` + `CleanMyMac` + `cargo` + `k9s`.
 
 ## 🚀 Installation
 
-*Note: Pre-compiled binaries via Homebrew and cURL install scripts are coming soon!*
-
-For now, you can install Scrub via Cargo if you have Rust installed:
+### Option 1: Homebrew (macOS / Linux)
+The easiest way to install Scrub is via our Homebrew tap:
 
 ```bash
-cargo install --path .
+brew install MonilMehta/scrub/scrub
+```
+
+### Option 2: cURL Install Script (macOS / Linux / Windows)
+You can download and install the pre-compiled binary directly:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MonilMehta/scrub/master/install.sh | bash
+```
+
+### Option 3: Cargo (Rust Developers)
+If you already have Rust installed, you can build from source:
+
+```bash
+cargo install --git https://github.com/MonilMehta/scrub
 ```
 
 Or just run it directly from the source code:
