@@ -498,14 +498,25 @@ fn build_proj_rows(report: &ScanReport) -> Vec<ProjRow> {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn run(paths: Vec<String>) -> Result<()> {
-    println!("Scanning developer caches...");
+    println!("Scanning developer caches...\n");
+    let start_time = std::time::Instant::now();
+    
     let config = Config::load();
     let mut plugin_manager = PluginManager::new();
     let _ = plugin_manager.load_bundled();
 
+    println!("✓ Loaded {} plugins\n", plugin_manager.plugins.len());
+    for p in &plugin_manager.plugins {
+        println!("  ✓ {}", p.name);
+    }
+    println!();
+
     let scan_roots = if !paths.is_empty() { paths } else { config.project_roots.clone() };
     let scanner = Scanner::new(plugin_manager.plugins);
     let report = scanner.scan(&scan_roots);
+
+    let elapsed = start_time.elapsed().as_secs_f64();
+    println!("Done in {:.2} s\n", elapsed);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
