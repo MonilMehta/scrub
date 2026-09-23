@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -13,8 +13,10 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::collections::HashSet;
-use std::io;
-use std::process::Command as SysCommand;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, TryRecvError};
+use std::time::Duration;
 
 use crate::core::config::Config;
 use crate::core::scanner::Scanner;
@@ -22,6 +24,7 @@ use crate::models::scan::{ItemStatus, ScanReport};
 use crate::plugins::manager::PluginManager;
 use crate::utils::age::format_age;
 use crate::utils::human_size::format_size;
+use crate::utils::paths::expand_tilde;
 
 // ── Row types ─────────────────────────────────────────────────────────────────
 
@@ -31,8 +34,6 @@ enum RowKind {
     EcoHeader { cat_idx: usize },
     GlobalItem { cat_idx: usize, item_idx: usize },
     CommandItem { cat_idx: usize, cmd_idx: usize },
-    ProjectHeader { cat_idx: usize, proj_idx: usize },
-    ProjectItem { cat_idx: usize, proj_idx: usize, item_idx: usize },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -71,7 +72,6 @@ struct ProjRow {
     safe: bool,
     last_modified: Option<u64>,
     path: std::path::PathBuf,
-    ecosystem: String,
     explanation: Option<String>,
 }
 
@@ -83,7 +83,7 @@ enum AppMode {
     Confirm,
     RunCommand { command: String, description: String },
     CommandOutput { output: String, success: bool },
-    Deleting,
+    Deleting { current: String, done: usize, total: usize, permanent: bool },
     Done,
 }
 
@@ -225,8 +225,7 @@ impl App {
         match self.tab { ActiveTab::Caches => self.total_selected_bytes, ActiveTab::Projects => self.proj_total_selected }
     }
 
-    fn do_delete(&mut self, permanent: bool) {
-        self.mode = AppMode::Deleting;
+    fn do_delete(&mut self, permanent: bool, mut render: impl FnMut(&mut Self) -> io::Result<()>) -> io::Result<()> {
         let paths: Vec<(std::path::PathBuf, u64)> = match self.tab {
             ActiveTab::Caches => {
                 let mut v: Vec<usize> = self.selected.iter().cloned().collect();
@@ -240,9 +239,12 @@ impl App {
             }
         };
 
-        for (path, size) in paths {
+        let total = paths.len();
+        for (done, (path, size)) in paths.into_iter().enumerate() {
             let label = path.file_name().map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string());
+            self.mode = AppMode::Deleting { current: label.clone(), done, total, permanent };
+            render(self)?;
             let res = if permanent {
                 if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) }
             } else {
@@ -258,16 +260,7 @@ impl App {
                     for i in 0..self.rows.len() {
                         if self.rows[i].path == path && self.rows[i].size_bytes > 0 {
                             self.rows[i].size_bytes = 0;
-                            if let RowKind::ProjectItem { cat_idx, proj_idx, .. } = self.rows[i].kind {
-                                for j in 0..self.rows.len() {
-                                    if let RowKind::ProjectHeader { cat_idx: c, proj_idx: p } = self.rows[j].kind {
-                                        if c == cat_idx && p == proj_idx { self.rows[j].size_bytes = self.rows[j].size_bytes.saturating_sub(size); }
-                                    }
-                                    if let RowKind::EcoHeader { cat_idx: c } = self.rows[j].kind {
-                                        if c == cat_idx { self.rows[j].size_bytes = self.rows[j].size_bytes.saturating_sub(size); }
-                                    }
-                                }
-                            } else if let RowKind::GlobalItem { cat_idx, .. } = self.rows[i].kind {
+                            if let RowKind::GlobalItem { cat_idx, .. } = self.rows[i].kind {
                                 for j in 0..self.rows.len() {
                                     if let RowKind::EcoHeader { cat_idx: c } = self.rows[j].kind {
                                         if c == cat_idx { self.rows[j].size_bytes = self.rows[j].size_bytes.saturating_sub(size); }
@@ -292,6 +285,8 @@ impl App {
                 }
                 Err(e) => self.delete_log.push(format!("✗ Failed {}: {}", label, e)),
             }
+            self.mode = AppMode::Deleting { current: label, done: done + 1, total, permanent };
+            render(self)?;
         }
 
         match self.tab {
@@ -299,6 +294,7 @@ impl App {
             ActiveTab::Projects => { self.proj_selected.clear(); self.proj_total_selected = 0; }
         }
         self.mode = AppMode::Done;
+        Ok(())
     }
 
     fn run_command(&mut self, command: &str) {
@@ -333,9 +329,8 @@ impl App {
                 let row = self.rows.get(i)?;
                 Some(DetailInfo {
                     name: row.label.trim().to_string(),
-                    path_str: row.path.display().to_string(),
+                    path_str: display_path(&row.path),
                     size_bytes: row.size_bytes,
-                    total_size: self.report.total_size,
                     safe: row.safe,
                     last_modified: row.last_modified,
                     explanation: row.explanation.clone(),
@@ -350,9 +345,8 @@ impl App {
                 let row = self.proj_rows.get(i)?;
                 Some(DetailInfo {
                     name: row.label.trim().to_string(),
-                    path_str: row.path.display().to_string(),
+                    path_str: display_path(&row.path),
                     size_bytes: row.size_bytes,
-                    total_size: self.report.total_size,
                     safe: row.safe,
                     last_modified: row.last_modified,
                     explanation: row.explanation.clone(),
@@ -370,7 +364,6 @@ struct DetailInfo {
     name: String,
     path_str: String,
     size_bytes: u64,
-    total_size: u64,
     safe: bool,
     last_modified: Option<u64>,
     explanation: Option<String>,
@@ -385,11 +378,15 @@ struct DetailInfo {
 fn build_cache_rows(report: &ScanReport) -> Vec<Row> {
     let mut rows = Vec::new();
     for (cat_idx, cat) in report.categories.iter().enumerate() {
+        let global_size: u64 = cat.global_items.iter()
+            .filter(|item| item.status == ItemStatus::Found && item.size_bytes > 0)
+            .map(|item| item.size_bytes).sum();
+        if global_size == 0 && cat.command_items.is_empty() { continue; }
         rows.push(Row {
             kind: RowKind::EcoHeader { cat_idx },
             selectable: false,
-            label: format!(" {} {}", if cat.is_detected { "✓" } else { "✗" }, cat.category),
-            size_bytes: cat.total_size,
+            label: cat.category.clone(),
+            size_bytes: global_size,
             safe: true,
             last_modified: None,
             path: std::path::PathBuf::new(),
@@ -397,10 +394,8 @@ fn build_cache_rows(report: &ScanReport) -> Vec<Row> {
             explanation: None,
             command_desc: None,
         });
-        if !cat.is_detected { continue; }
-
         for (item_idx, item) in cat.global_items.iter().enumerate() {
-            if item.status != ItemStatus::Found { continue; }
+            if item.status != ItemStatus::Found || item.size_bytes == 0 { continue; }
             rows.push(Row {
                 kind: RowKind::GlobalItem { cat_idx, item_idx },
                 selectable: true,
@@ -430,35 +425,6 @@ fn build_cache_rows(report: &ScanReport) -> Vec<Row> {
             });
         }
 
-        for (proj_idx, proj) in cat.projects.iter().enumerate() {
-            rows.push(Row {
-                kind: RowKind::ProjectHeader { cat_idx, proj_idx },
-                selectable: false,
-                label: format!("   → {}", proj.name),
-                size_bytes: proj.total_size,
-                safe: true,
-                last_modified: proj.last_modified,
-                path: proj.path.clone(),
-                action: RowAction::None,
-                explanation: None,
-                command_desc: None,
-            });
-            for (item_idx, item) in proj.items.iter().enumerate() {
-                if item.status != ItemStatus::Found || item.size_bytes == 0 { continue; }
-                rows.push(Row {
-                    kind: RowKind::ProjectItem { cat_idx, proj_idx, item_idx },
-                    selectable: true,
-                    label: format!("      {}", item.name),
-                    size_bytes: item.size_bytes,
-                    safe: item.safe,
-                    last_modified: item.last_modified,
-                    path: item.path.clone(),
-                    action: RowAction::Delete,
-                    explanation: item.explanation.clone(),
-                    command_desc: None,
-                });
-            }
-        }
     }
     rows
 }
@@ -466,16 +432,22 @@ fn build_cache_rows(report: &ScanReport) -> Vec<Row> {
 fn build_proj_rows(report: &ScanReport) -> Vec<ProjRow> {
     let mut rows = Vec::new();
     for (proj_idx, proj) in report.projects.iter().enumerate() {
-        let _age = proj.last_modified.map(format_age).unwrap_or_default();
+        if proj.total_size == 0 { continue; }
+        let parent = proj.path.parent().and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy()).unwrap_or_default();
+        let label = if proj.path.file_name().is_some_and(|name| name == proj.name.as_str()) {
+            format!("{} / {}", parent, proj.name)
+        } else {
+            proj.name.clone()
+        };
         rows.push(ProjRow {
             kind: ProjRowKind::Header { proj_idx },
             selectable: false,
-            label: format!(" {} ", proj.name),
+            label,
             size_bytes: proj.total_size,
             safe: true,
             last_modified: proj.last_modified,
             path: proj.path.clone(),
-            ecosystem: proj.ecosystem.clone(),
             explanation: None,
         });
         for (item_idx, item) in proj.items.iter().enumerate() {
@@ -487,7 +459,6 @@ fn build_proj_rows(report: &ScanReport) -> Vec<ProjRow> {
                 safe: item.safe,
                 last_modified: item.last_modified,
                 path: item.path.clone(),
-                ecosystem: String::new(),
                 explanation: item.explanation.clone(),
             });
         }
@@ -497,26 +468,74 @@ fn build_proj_rows(report: &ScanReport) -> Vec<ProjRow> {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+fn discover_scan_roots(home: &Path, cwd: &Path, config: &Config) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = config.project_roots.iter().map(expand_tilde).collect();
+    if let Ok(entries) = std::fs::read_dir(home) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if ["code", "projects", "developer", "development", "workspace", "workspaces", "repos", "src", "github"]
+                .contains(&name.as_str()) {
+                candidates.push(entry.path());
+            }
+        }
+    }
+    if ["Cargo.toml", "package.json", "pyproject.toml", ".git"]
+        .iter().any(|marker| cwd.join(marker).exists()) {
+        if let Some(parent) = cwd.parent() {
+            if parent != home { candidates.push(parent.to_path_buf()); }
+        }
+    }
+    let mut seen = HashSet::new();
+    candidates.into_iter().filter(|path| path.is_dir())
+        .filter(|path| seen.insert(path.canonicalize().unwrap_or_else(|_| path.clone())))
+        .collect()
+}
+
+fn choose_scan_roots(paths: Vec<String>, config: &Config) -> Result<Vec<PathBuf>> {
+    let home = dirs::home_dir().unwrap_or_default();
+    let candidates = if paths.is_empty() {
+        discover_scan_roots(&home, &std::env::current_dir()?, config)
+    } else {
+        paths.into_iter().map(expand_tilde).collect()
+    };
+    if !candidates.is_empty() {
+        println!("Project directories to scan:");
+        for path in &candidates { println!("  {}", path.display()); }
+        loop {
+            let prompt = if candidates.len() == 1 { "Is this your project directory? [Y/n]: " }
+                else { "Are these your project directories? [Y/n]: " };
+            print!("{}", prompt);
+            io::stdout().flush()?;
+            let mut answer = String::new();
+            if io::stdin().read_line(&mut answer)? == 0 { anyhow::bail!("No project directory provided"); }
+            match answer.trim().to_ascii_lowercase().as_str() {
+                "" | "y" | "yes" => {
+                    if candidates.iter().all(|path| path.is_dir()) { return Ok(candidates); }
+                    println!("One or more directories do not exist. Enter a directory to scan.");
+                    break;
+                }
+                "n" | "no" => break,
+                _ => println!("Please enter y or n."),
+            }
+        }
+    }
+    loop {
+        print!("Project directory to scan: ");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input)? == 0 { anyhow::bail!("No project directory provided"); }
+        let path = expand_tilde(input.trim());
+        if path.is_dir() { return Ok(vec![path]); }
+        println!("Enter an existing directory.");
+    }
+}
+
 pub fn run(paths: Vec<String>) -> Result<()> {
-    println!("Scanning developer caches...\n");
-    let start_time = std::time::Instant::now();
-    
     let config = Config::load();
+    let scan_roots = choose_scan_roots(paths, &config)?;
     let mut plugin_manager = PluginManager::new();
     let _ = plugin_manager.load_bundled();
-
-    println!("✓ Loaded {} plugins\n", plugin_manager.plugins.len());
-    for p in &plugin_manager.plugins {
-        println!("  ✓ {}", p.name);
-    }
-    println!();
-
-    let scan_roots = if !paths.is_empty() { paths } else { config.project_roots.clone() };
     let scanner = Scanner::new(plugin_manager.plugins);
-    let report = scanner.scan(&scan_roots);
-
-    let elapsed = start_time.elapsed().as_secs_f64();
-    println!("Done in {:.2} s\n", elapsed);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -524,31 +543,78 @@ pub fn run(paths: Vec<String>) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(report);
-    let res = event_loop(&mut terminal, &mut app);
+    let (tx, rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let report = scanner.scan_with_progress(&scan_roots, |path, _| {
+            let _ = tx.try_send(ScanMessage::Path(path.to_path_buf()));
+        });
+        let _ = tx.send(ScanMessage::Done(report));
+    });
 
-    let receipt = app.receipt.clone();
+    let mut receipt = Vec::new();
+    let res = match scan_loop(&mut terminal, &rx) {
+        Ok(Some(report)) => {
+            let mut app = App::new(report);
+            let result = event_loop(&mut terminal, &mut app);
+            receipt = app.receipt;
+            result
+        }
+        Ok(None) => Ok(()),
+        Err(error) => Err(error),
+    };
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
-    if let Err(e) = res { println!("{:?}", e); }
+    res?;
 
     if !receipt.is_empty() {
         use crossterm::style::Stylize;
         println!("\n🧾 Scrub Receipt");
         println!("{}", "─".repeat(50));
-        let mut total = 0;
+        let mut deleted = 0;
+        let mut trashed = 0;
         for (label, size, perm) in receipt {
             let action = if perm { "Permanently deleted".red() } else { "Moved to Trash".yellow() };
             println!("✓ {} {:<20} {}", action, label, format_size(size).bold());
-            total += size;
+            if perm { deleted += size; } else { trashed += size; }
         }
         println!("{}", "─".repeat(50));
-        println!("Total reclaimed: {}\n", format_size(total).green().bold());
+        if deleted > 0 { println!("Estimated space freed: {}", format_size(deleted).green().bold()); }
+        if trashed > 0 { println!("Moved to Trash: {} (space freed when Trash is emptied)", format_size(trashed).yellow().bold()); }
+        println!();
     }
 
     Ok(())
+}
+
+enum ScanMessage {
+    Path(PathBuf),
+    Done(ScanReport),
+}
+
+fn scan_loop<B: Backend>(terminal: &mut Terminal<B>, rx: &mpsc::Receiver<ScanMessage>) -> io::Result<Option<ScanReport>> {
+    let frames = ["◐", "◓", "◑", "◒"];
+    let mut current = PathBuf::new();
+    let mut tick = 0;
+    loop {
+        match rx.try_recv() {
+            Ok(ScanMessage::Path(path)) => current = path,
+            Ok(ScanMessage::Done(report)) => return Ok(Some(report)),
+            Err(TryRecvError::Empty) => {},
+            Err(TryRecvError::Disconnected) => return Err(io::Error::other("Scan stopped unexpectedly")),
+        }
+        terminal.draw(|f| draw_scanning(f, frames[tick % frames.len()], &current))?;
+        tick += 1;
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q'))
+                    || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
+                    return Ok(None);
+                }
+            }
+        }
+    }
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────────
@@ -576,8 +642,8 @@ fn event_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Resu
                     _ => {}
                 },
                 AppMode::Confirm => match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') => app.do_delete(false),
-                    KeyCode::Char('p') | KeyCode::Char('P') => app.do_delete(true),
+                    KeyCode::Char('y') | KeyCode::Char('Y') => app.do_delete(false, |app| terminal.draw(|f| draw(f, app)).map(|_| ()))?,
+                    KeyCode::Char('p') | KeyCode::Char('P') => app.do_delete(true, |app| terminal.draw(|f| draw(f, app)).map(|_| ()))?,
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.mode = AppMode::Browse,
                     _ => {}
                 },
@@ -596,13 +662,34 @@ fn event_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Resu
                     }
                     _ => {}
                 },
-                AppMode::Deleting => {}
+                AppMode::Deleting { .. } => {}
             }
         }
     }
 }
 
 // ── Drawing ───────────────────────────────────────────────────────────────────
+
+fn draw_scanning(f: &mut Frame, spinner: &str, path: &Path) {
+    let area = centered_rect(70, 35, f.area());
+    let current = if path.as_os_str().is_empty() {
+        "Looking for caches".to_string()
+    } else {
+        let parent = path.parent().and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        format!("{} / {}", parent, name)
+    };
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(format!("{}  Scanning caches", spinner), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from(current),
+        Line::from(""),
+        Line::from(Span::styled("q / Esc to cancel", Style::default().fg(Color::DarkGray))),
+    ];
+    let block = Block::default().title(" Scrub ").borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan));
+    f.render_widget(Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center).block(block), area);
+}
 
 fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -617,8 +704,8 @@ fn draw(f: &mut Frame, app: &mut App) {
     draw_tabs(f, app, layout[1]);
 
     let body = Layout::horizontal([
-        Constraint::Percentage(52),
-        Constraint::Percentage(48),
+        Constraint::Percentage(55),
+        Constraint::Percentage(45),
     ]).split(layout[2]);
 
     match app.tab {
@@ -639,7 +726,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             let out = output.clone(); let ok = *success;
             draw_command_output(f, area, &out, ok);
         }
-        AppMode::Deleting => draw_deleting(f, area),
+        AppMode::Deleting { .. } => draw_deleting(f, area, app),
         AppMode::Done => draw_done(f, app, area),
         _ => {}
     }
@@ -647,13 +734,13 @@ fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let sel_info = if app.selected_bytes() > 0 {
-        format!("  ·  {} selected for deletion", format_size(app.selected_bytes()))
+        format!("  ·  {} selected", format_size(app.selected_bytes()))
     } else { String::new() };
 
     let line = Line::from(vec![
         Span::styled(" 🧹 Scrub  ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::styled(format_size(app.report.total_size), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::styled(" reclaimable", Style::default().fg(Color::DarkGray)),
+        Span::styled(" found in cache locations", Style::default().fg(Color::DarkGray)),
         Span::styled(sel_info, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
     ]);
     let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan));
@@ -661,7 +748,10 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
-    let titles = vec!["  Caches  ", "  Projects  "];
+    let titles = vec![
+        format!("  Computer caches{}  ", if app.selected.is_empty() { String::new() } else { format!(" ({})", app.selected.len()) }),
+        format!("  Project caches{}  ", if app.proj_selected.is_empty() { String::new() } else { format!(" ({})", app.proj_selected.len()) }),
+    ];
     let selected = match app.tab { ActiveTab::Caches => 0, ActiveTab::Projects => 1 };
     let tabs = Tabs::new(titles)
         .select(selected)
@@ -671,19 +761,33 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(tabs, area);
 }
 
+fn fit_name(name: &str, width: usize) -> String {
+    if name.chars().count() > width {
+        format!("{}…", name.chars().take(width.saturating_sub(1)).collect::<String>())
+    } else {
+        format!("{name:<width$}")
+    }
+}
+
+fn display_path(path: &Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(relative) = path.strip_prefix(home) {
+            return format!("~/{}", relative.display());
+        }
+    }
+    path.display().to_string()
+}
+
 fn draw_cache_list(f: &mut Frame, app: &mut App, area: Rect) {
-    let total = app.report.total_size.max(1);
+    let name_width = (area.width as usize).saturating_sub(28).max(1);
     let items: Vec<ListItem> = app.rows.iter().enumerate().map(|(idx, row)| {
         let is_sel = app.selected.contains(&idx);
         match &row.kind {
             RowKind::EcoHeader { .. } => {
-                let sym = if row.label.contains('✓') { "✓" } else { "✗" };
-                let color = if row.label.contains('✓') { Color::Green } else { Color::DarkGray };
-                let name = row.label.trim().trim_start_matches("✓ ").trim_start_matches("✗ ");
                 let size_s = if row.size_bytes > 0 { format!("  {}", format_size(row.size_bytes)) } else { String::new() };
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!(" {} ", sym), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                    Span::styled(name.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("  ▸ ", Style::default().fg(Color::Cyan)),
+                    Span::styled(row.label.clone(), Style::default().add_modifier(Modifier::BOLD)),
                     Span::styled(size_s, Style::default().fg(Color::DarkGray)),
                 ]))
             }
@@ -691,43 +795,27 @@ fn draw_cache_list(f: &mut Frame, app: &mut App, area: Rect) {
                 let safety = if row.safe { Color::Green } else { Color::Yellow };
                 let name = row.label.trim();
                 ListItem::new(Line::from(vec![
-                    Span::styled("  [⚡] ", Style::default().fg(Color::Blue)),
-                    Span::styled(format!("{:<24}", name.trim_start_matches("⚡ ")), Style::default().fg(Color::Blue)),
-                    Span::styled(if row.safe { "  ✓ safe" } else { "  ⚠ caution" }, Style::default().fg(safety)),
-                ]))
-            }
-            RowKind::ProjectHeader { .. } => {
-                let age = row.last_modified.map(format_age).map(|a| format!("  {}", a)).unwrap_or_default();
-                let name = row.label.trim().trim_start_matches("→ ");
-                ListItem::new(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled("→ ", Style::default().fg(Color::Cyan)),
-                    Span::styled(name.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("  {}", format_size(row.size_bytes)), Style::default().fg(Color::Yellow)),
-                    Span::styled(age, Style::default().fg(Color::DarkGray)),
+                    Span::styled("  [run] ", Style::default().fg(Color::Blue)),
+                    Span::styled(fit_name(name.trim_start_matches("⚡ "), name_width), Style::default().fg(Color::Blue)),
+                    Span::styled(if row.safe { "" } else { " ⚠ caution" }, Style::default().fg(safety)),
                 ]))
             }
             _ => {
                 let check = if is_sel { "[✓]" } else { "[ ]" };
                 let check_color = if is_sel { Color::Yellow } else { Color::DarkGray };
-                let pct = if row.size_bytes > 0 {
-                    format!(" {:>4.1}%", (row.size_bytes as f64 / total as f64) * 100.0)
-                } else { String::new() };
-                let safety = if row.safe { Color::Green } else { Color::Yellow };
                 let name = row.label.trim();
                 ListItem::new(Line::from(vec![
                     Span::styled(format!("  {} ", check), Style::default().fg(check_color)),
-                    Span::styled(format!("{:<22}", name), Style::default()),
+                    Span::styled(fit_name(name, name_width), Style::default()),
                     Span::styled(format!("{:>10}", format_size(row.size_bytes)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("{:<6}", pct), Style::default().fg(Color::DarkGray)),
-                    Span::styled(if row.safe { "  ✓ safe" } else { "  ⚠" }, Style::default().fg(safety)),
+                    Span::styled(if row.safe { "" } else { " ⚠" }, Style::default().fg(Color::Yellow)),
                 ]))
             }
         }
     }).collect();
 
     let block = Block::default()
-        .title(" Developer Caches ")
+        .title(" Computer caches ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
     let list = List::new(items).block(block)
@@ -737,50 +825,39 @@ fn draw_cache_list(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_proj_list(f: &mut Frame, app: &mut App, area: Rect) {
-    let total = app.report.total_size.max(1);
+    let name_width = (area.width as usize).saturating_sub(29).max(1);
     let items: Vec<ListItem> = app.proj_rows.iter().enumerate().map(|(idx, row)| {
         let is_sel = app.proj_selected.contains(&idx);
         match &row.kind {
             ProjRowKind::Header { .. } => {
-                let age = row.last_modified.map(format_age).map(|a| format!("  {}", a)).unwrap_or_default();
-                let pct = if row.size_bytes > 0 {
-                    format!("  {:.1}%", (row.size_bytes as f64 / total as f64) * 100.0)
-                } else { String::new() };
                 ListItem::new(Line::from(vec![
                     Span::styled(" ◈ ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-                    Span::styled(row.label.trim().to_string(), Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(fit_name(row.label.trim(), name_width + 4), Style::default().add_modifier(Modifier::BOLD)),
                     Span::styled(format!("  {}", format_size(row.size_bytes)), Style::default().fg(Color::Yellow)),
-                    Span::styled(pct, Style::default().fg(Color::DarkGray)),
-                    Span::styled(age, Style::default().fg(Color::DarkGray)),
-                    Span::styled(format!("  [{}]", row.ecosystem), Style::default().fg(Color::Blue)),
                 ]))
             }
             ProjRowKind::Item { .. } => {
                 let check = if is_sel { "[✓]" } else { "[ ]" };
                 let check_color = if is_sel { Color::Yellow } else { Color::DarkGray };
-                let safety = if row.safe { Color::Green } else { Color::Yellow };
-                let pct = if row.size_bytes > 0 {
-                    format!(" {:>4.1}%", (row.size_bytes as f64 / total as f64) * 100.0)
-                } else { String::new() };
                 let name = row.label.trim();
                 ListItem::new(Line::from(vec![
                     Span::styled(format!("   {} ", check), Style::default().fg(check_color)),
-                    Span::styled(format!("{:<20}", name), Style::default()),
+                    Span::styled(fit_name(name, name_width), Style::default()),
                     Span::styled(format!("{:>10}", format_size(row.size_bytes)), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("{:<6}", pct), Style::default().fg(Color::DarkGray)),
-                    Span::styled(if row.safe { "  ✓" } else { "  ⚠" }, Style::default().fg(safety)),
+                    Span::styled(if row.safe { "" } else { " ⚠" }, Style::default().fg(Color::Yellow)),
                 ]))
             }
         }
     }).collect();
 
+    let project_count = app.report.projects.iter().filter(|p| p.total_size > 0).count();
     let block = Block::default()
-        .title(format!(" Projects ({} found) ", app.report.projects.len()))
+        .title(format!(" Project caches ({} {}) ", project_count, if project_count == 1 { "project" } else { "projects" }))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
 
     if items.is_empty() {
-        let msg = "\n\n\nNo projects found.\n\nEdit ~/.config/scrub/config.toml to add your code directories,\nor run `scrub dashboard /path/to/projects`";
+        let msg = "\n\nNo project caches found.";
         let para = Paragraph::new(msg)
             .alignment(ratatui::layout::Alignment::Center)
             .style(Style::default().fg(Color::DarkGray))
@@ -805,7 +882,6 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
 
     let Some(d) = app.current_detail() else { return; };
 
-    let pct = (d.size_bytes as f64 / d.total_size.max(1) as f64) * 100.0;
     let age = d.last_modified.map(format_age).unwrap_or_else(|| "—".to_string());
     let safety_style = if d.safe { Style::default().fg(Color::Green) } else { Style::default().fg(Color::Yellow) };
 
@@ -813,6 +889,21 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled(d.name.clone(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
         Line::from(""),
     ];
+
+    if !d.selectable {
+        if d.size_bytes > 0 {
+            lines.push(Line::from(format!("Measured size  {}", format_size(d.size_bytes))));
+        }
+        if !d.path_str.is_empty() && d.path_str != "." {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Project directory"));
+            lines.push(Line::from(d.path_str));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from("Choose a cache below to see what can be removed."));
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+        return;
+    }
 
     if d.is_command {
         lines.push(Line::from(Span::styled("⚡ Command Action", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))));
@@ -833,10 +924,6 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled("Size     ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format_size(d.size_bytes), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
             ]));
-            lines.push(Line::from(vec![
-                Span::styled("Share    ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:.2}% of total", pct), Style::default().fg(Color::Yellow)),
-            ]));
         }
         lines.push(Line::from(vec![
             Span::styled("Modified ", Style::default().fg(Color::DarkGray)),
@@ -849,14 +936,6 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                 safety_style,
             ),
         ]));
-        if !d.path_str.is_empty() && d.path_str != "." {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("Path", Style::default().fg(Color::DarkGray))));
-            lines.push(Line::from(Span::styled(
-                d.path_str.clone(),
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-            )));
-        }
         if let Some(expl) = &d.explanation {
             lines.push(Line::from(""));
             let (label, label_color) = if d.safe {
@@ -876,20 +955,28 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
             )));
         }
+        if !d.path_str.is_empty() && d.path_str != "." {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("Path", Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(Span::styled(
+                d.path_str.clone(),
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            )));
+        }
     }
 
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    let n = app.selected_count();
-    let hint = if n > 0 {
-        format!(" [↑/↓] Navigate  [Space] Toggle  [d] Delete {} items ({})  [c] Clear  [Tab] Switch tab  [q] Quit",
-            n, format_size(app.selected_bytes()))
+    let hint = if area.width >= 68 {
+        " Space Select  d Delete  c Clear  Tab Views  q Quit"
+    } else if area.width >= 48 {
+        " Space Select  d Delete  Tab Views  q Quit"
     } else {
-        " [↑/↓] Navigate  [Space/Enter] Select  [d] Delete selected  [Tab] Switch tab  [q] Quit".to_string()
+        " Space Select  d Delete  q Quit"
     };
-    let style = if n > 0 { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::DarkGray) };
+    let style = if app.selected_count() > 0 { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::DarkGray) };
     let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray));
     f.render_widget(Paragraph::new(hint).style(style).block(block), area);
 }
@@ -908,7 +995,7 @@ fn get_confirm_items(app: &App) -> Vec<(String, u64)> {
 }
 
 fn draw_confirm(f: &mut Frame, area: Rect, items: &[(String, u64)], total_bytes: u64) {
-    let popup = centered_rect(60, 55, area);
+    let popup = centered_rect(70, 65, area);
     f.render_widget(Clear, popup);
     let block = Block::default()
         .title(" ⚠  Confirm Deletion ")
@@ -920,29 +1007,29 @@ fn draw_confirm(f: &mut Frame, area: Rect, items: &[(String, u64)], total_bytes:
     let mut lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            format!("  Move {} items ({}) to Trash?", items.len(), format_size(total_bytes)),
+            format!("  Remove {} item{} ({})?", items.len(), if items.len() == 1 { "" } else { "s" }, format_size(total_bytes)),
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
-    for (name, size) in items.iter().take(10) {
+    for (name, size) in items.iter().take(3) {
         lines.push(Line::from(vec![
             Span::styled("  • ", Style::default().fg(Color::Yellow)),
             Span::styled(name.clone(), Style::default().fg(Color::Gray)),
             Span::styled(format!("  ({})", format_size(*size)), Style::default().fg(Color::White)),
         ]));
     }
-    if items.len() > 10 {
-        lines.push(Line::from(Span::styled(format!("  ... and {} more", items.len() - 10), Style::default().fg(Color::DarkGray))));
+    if items.len() > 3 {
+        lines.push(Line::from(Span::styled(format!("  ... and {} more", items.len() - 3), Style::default().fg(Color::DarkGray))));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("  Items go to Trash — easily recoverable.", Style::default().fg(Color::DarkGray))));
+    lines.push(Line::from(Span::styled("  Trash is recoverable; permanent deletion is not.", Style::default().fg(Color::DarkGray))));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("  [Y] Move to Trash   ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::styled("[P] Delete Permanently   ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-        Span::styled("[N/Esc] Cancel", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+        Span::styled("[P] Delete Permanently", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
     ]));
+    lines.push(Line::from(Span::styled("  [N/Esc] Cancel", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))));
     f.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -994,14 +1081,16 @@ fn draw_command_output(f: &mut Frame, area: Rect, output: &str, success: bool) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
-fn draw_deleting(f: &mut Frame, area: Rect) {
-    let popup = centered_rect(40, 20, area);
+fn draw_deleting(f: &mut Frame, area: Rect, app: &App) {
+    let AppMode::Deleting { current, done, total, permanent } = &app.mode else { return; };
+    let popup = centered_rect(65, 30, area);
     f.render_widget(Clear, popup);
     let block = Block::default()
         .title(" Deleting... ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
-    f.render_widget(Paragraph::new("\n  Moving to Trash...").block(block), popup);
+    let action = if *permanent { "Permanently deleting" } else { "Moving to Trash" };
+    f.render_widget(Paragraph::new(format!("\n  {} ({} of {})\n  {}", action, done, total, current)).block(block), popup);
 }
 
 fn draw_done(f: &mut Frame, app: &App, area: Rect) {
@@ -1014,14 +1103,18 @@ fn draw_done(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
-    let mut lines = vec![Line::from(""), Line::from("  Results:"), Line::from("")];
-    for entry in &app.delete_log {
+    let sections = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
+    let visible = app.delete_log.len().min(sections[0].height.saturating_sub(3) as usize);
+    let mut lines = vec![Line::from("  Results:"), Line::from("")];
+    for entry in app.delete_log.iter().take(visible) {
         let color = if entry.starts_with('✓') { Color::Green } else { Color::Red };
         lines.push(Line::from(Span::styled(format!("  {}", entry), Style::default().fg(color))));
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("  [Enter] Dismiss", Style::default().fg(Color::DarkGray))));
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    if app.delete_log.len() > visible {
+        lines.push(Line::from(Span::styled(format!("  ... and {} more", app.delete_log.len() - visible), Style::default().fg(Color::DarkGray))));
+    }
+    f.render_widget(Paragraph::new(lines), sections[0]);
+    f.render_widget(Paragraph::new("  [Enter] Dismiss").style(Style::default().fg(Color::DarkGray)), sections[1]);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1037,4 +1130,139 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         Constraint::Percentage(percent_x),
         Constraint::Percentage((100 - percent_x) / 2),
     ]).split(v[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::scan::{CacheItem, CategoryReport, ProjectReport, ProjectSummary};
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn scanning_screen_shows_spinner_and_current_folder() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| draw_scanning(f, "◐", Path::new("/code/tal-app/.next"))).unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("◐  Scanning caches"));
+        assert!(screen.contains("tal-app / .next"));
+        assert!(!screen.contains("entries"));
+    }
+
+    #[test]
+    fn deletion_result_keeps_dismiss_visible_when_log_is_long() {
+        let report = ScanReport { categories: vec![], total_size: 0, projects: vec![] };
+        let mut app = App::new(report);
+        app.delete_log = (0..20).map(|i| format!("✓ Deleted cache {i}")).collect();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| draw_done(f, &app, f.area())).unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("[Enter] Dismiss"));
+        assert!(screen.contains("... and "));
+    }
+
+    #[test]
+    fn footer_keeps_quit_hint_at_narrow_width() {
+        let report = ScanReport { categories: vec![], total_size: 0, projects: vec![] };
+        let app = App::new(report);
+        let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
+        terminal.draw(|f| draw_footer(f, &app, f.area())).unwrap();
+        assert!(terminal.backend().to_string().contains("q Quit"));
+    }
+
+    #[test]
+    fn shows_only_nonempty_caches_in_their_respective_tabs() {
+        let cache = CacheItem {
+            name: "DerivedData".into(), path: "DerivedData".into(), size_bytes: 10,
+            file_count: 1, dir_count: 0, safe: true, explanation: None,
+            status: ItemStatus::Found, last_modified: None,
+        };
+        let project_item = CacheItem { name: "Pods".into(), size_bytes: 5, ..cache.clone() };
+        let project = ProjectReport {
+            name: "tal-app".into(), path: "grapevine/tal-app".into(),
+            items: vec![project_item.clone()], total_size: 5, last_modified: None,
+        };
+        let report = ScanReport {
+            categories: vec![CategoryReport {
+                category: "Xcode".into(), global_items: vec![cache],
+                projects: vec![project], command_items: vec![], total_size: 15,
+                is_detected: true,
+            }],
+            total_size: 15,
+            projects: vec![
+                ProjectSummary {
+                    name: "empty".into(), path: "grapevine/empty".into(),
+                    ecosystem: "Xcode".into(), items: vec![], total_size: 0, last_modified: None,
+                },
+                ProjectSummary {
+                    name: "tal-app".into(), path: "grapevine/tal-app".into(),
+                    ecosystem: "Xcode".into(), items: vec![project_item.clone()], total_size: 5, last_modified: None,
+                },
+                ProjectSummary {
+                    name: "paperboy (app)".into(), path: "grapevine/paperboy/app".into(),
+                    ecosystem: "Expo".into(), items: vec![project_item], total_size: 5, last_modified: None,
+                },
+            ],
+        };
+
+        let caches = build_cache_rows(&report);
+        assert_eq!(caches.len(), 2);
+        assert_eq!(caches[0].size_bytes, 10);
+        assert!(matches!(caches[1].kind, RowKind::GlobalItem { .. }));
+        let projects = build_proj_rows(&report);
+        assert_eq!(projects.len(), 4);
+        assert_eq!(projects[0].label, "grapevine / tal-app");
+        assert_eq!(projects[2].label, "paperboy (app)");
+    }
+
+    #[test]
+    fn discovers_common_and_current_project_roots() {
+        let root = std::env::temp_dir().join(format!("scrub-roots-{}", std::process::id()));
+        let home = root.join("home");
+        let project_root = root.join("grapevine");
+        let cwd = project_root.join("scrub");
+        std::fs::create_dir_all(home.join("Projects")).unwrap();
+        std::fs::create_dir_all(home.join("Documents")).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("Cargo.toml"), "").unwrap();
+
+        let config = Config { project_roots: vec![], ..Config::default() };
+        let found = discover_scan_roots(&home, &cwd, &config);
+        assert_eq!(found.len(), 2);
+        assert!(found.contains(&home.join("Projects")));
+        assert!(found.contains(&project_root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deletion_reports_progress_before_and_after_the_file_is_removed() {
+        let root = std::env::temp_dir().join(format!("scrub-delete-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("cache");
+        std::fs::write(&path, "x").unwrap();
+        let item = CacheItem {
+            name: "cache".into(), path: path.clone(), size_bytes: 1,
+            file_count: 1, dir_count: 0, safe: true, explanation: None,
+            status: ItemStatus::Found, last_modified: None,
+        };
+        let report = ScanReport {
+            categories: vec![], total_size: 1,
+            projects: vec![ProjectSummary {
+                name: "project".into(), path: root.clone(), ecosystem: "test".into(),
+                items: vec![item], total_size: 1, last_modified: None,
+            }],
+        };
+        let mut app = App::new(report);
+        app.tab = ActiveTab::Projects;
+        app.proj_selected.insert(1);
+        let mut updates = Vec::new();
+        app.do_delete(true, |app| {
+            if let AppMode::Deleting { done, .. } = &app.mode {
+                updates.push((*done, path.exists()));
+            }
+            Ok(())
+        }).unwrap();
+        assert_eq!(updates, vec![(0, true), (1, false)]);
+        assert_eq!(app.mode, AppMode::Done);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

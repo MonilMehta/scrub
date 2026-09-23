@@ -1,7 +1,7 @@
 use std::path::Path;
 use jwalk::WalkDir;
 
-pub fn calculate_size<P: AsRef<Path>>(path: P) -> (u64, usize, usize) {
+pub fn calculate_size<P: AsRef<Path>>(path: P, mut progress: impl FnMut(usize)) -> (u64, usize, usize) {
     let mut total_size = 0;
     let mut file_count = 0;
     let mut dir_count = 0;
@@ -15,7 +15,11 @@ pub fn calculate_size<P: AsRef<Path>>(path: P) -> (u64, usize, usize) {
         } else if entry.file_type().is_dir() {
             dir_count += 1;
         }
+        let count = file_count + dir_count;
+        if count % 256 == 0 { progress(count); }
     }
+
+    progress(file_count + dir_count);
 
     (total_size, file_count, dir_count)
 }

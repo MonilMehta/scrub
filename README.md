@@ -17,8 +17,8 @@ Think: `lazygit` + `CleanMyMac` + `cargo` + `k9s`.
   - CocoaPods, Homebrew, Python, Flutter, and more.
 - **Cross-Platform:** Works natively on macOS, Linux, and Windows.
 - **Dual Views:**
-  - **Caches Tab:** View global ecosystems (e.g., all of Android, all of Xcode, all of Docker).
-  - **Projects Tab:** View space used by individual projects across your machine, sorted by size.
+  - **Computer Caches:** View caches stored outside individual projects (e.g., Xcode, Android, Docker).
+  - **Project Caches:** View nonempty caches inside individual projects, sorted by size.
 - **Detailed Explanations:** Explains exactly *why* a folder is safe to delete and how it will be regenerated.
 
 ## 🚀 Installation
@@ -49,6 +49,28 @@ Or just run it directly from the source code:
 cargo run --release -- dashboard
 ```
 
+### Updating
+
+After a new release is published, update using the same installation method:
+
+```bash
+brew update && brew upgrade MonilMehta/scrub/scrub
+```
+
+Or rerun the install script, which downloads the latest release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MonilMehta/scrub/master/install.sh | bash
+```
+
+For Cargo installs, run:
+
+```bash
+cargo install --git https://github.com/MonilMehta/scrub --force
+```
+
+Homebrew updates require the tap formula to be updated to the new release.
+
 ## 🎮 Usage
 
 Launch the interactive dashboard:
@@ -57,7 +79,9 @@ Launch the interactive dashboard:
 scrub dashboard
 ```
 
-Or, you can tell Scrub exactly which directories to scan:
+With no paths, the dashboard suggests existing project directories. It always asks you to confirm the directories or enter a different one before scanning. A spinner appears during the scan; press `q` or `Esc` to cancel.
+
+Or, you can provide directories for Scrub to confirm:
 ```bash
 scrub dashboard ~/Code ~/Projects ~/MyWeirdFolder
 ```

@@ -27,6 +27,14 @@ impl Scanner {
     }
 
     pub fn scan<P: AsRef<Path>>(&self, roots: &[P]) -> ScanReport {
+        self.scan_with_progress(roots, |_, _| {})
+    }
+
+    pub fn scan_with_progress<P: AsRef<Path>>(
+        &self,
+        roots: &[P],
+        mut progress: impl FnMut(&Path, usize),
+    ) -> ScanReport {
         // ── Phase 1: Global items ─────────────────────────────────────────────
         let mut cat_map: HashMap<String, CategoryReport> = HashMap::new();
 
@@ -59,7 +67,7 @@ impl Scanner {
                                 if child_name.ends_with(".ini") || child_name.ends_with(".pub") { continue; }
 
                                 let (status, size_bytes, file_count, dir_count, last_modified) =
-                                    measure_path(&child_path);
+                                    measure_path(&child_path, &mut progress);
 
                                 if status == ItemStatus::Found {
                                     cat.total_size += size_bytes;
@@ -79,7 +87,7 @@ impl Scanner {
                         }
                     } else {
                         let (status, size_bytes, file_count, dir_count, last_modified) =
-                            measure_path(&full_path);
+                            measure_path(&full_path, &mut progress);
 
                         if status == ItemStatus::Found {
                             cat.is_detected = true;
@@ -120,7 +128,7 @@ impl Scanner {
         for root in roots {
             let root_path = expand_tilde(root.as_ref().to_string_lossy().as_ref());
             if !root_path.exists() { continue; }
-            self.walk_for_projects(&root_path, 0, &mut cat_map);
+            self.walk_for_projects(&root_path, 0, &mut cat_map, &mut progress);
         }
 
         // ── Phase 3: Build cross-ecosystem project summaries ──────────────────
@@ -160,8 +168,10 @@ impl Scanner {
         dir: &Path,
         depth: usize,
         cat_map: &mut HashMap<String, CategoryReport>,
+        progress: &mut impl FnMut(&Path, usize),
     ) {
         if depth > MAX_WALK_DEPTH { return; }
+        progress(dir, 0);
 
         let entries: Vec<(String, PathBuf, bool)> = match std::fs::read_dir(dir) {
             Ok(rd) => rd.flatten().map(|e| {
@@ -186,7 +196,7 @@ impl Scanner {
                 if !is_dir { continue; }
                 if depth == 0 && name.starts_with('.') { continue; }
                 if SKIP_DESCENT.contains(&name.as_str()) { continue; }
-                self.walk_for_projects(path, depth + 1, cat_map);
+                self.walk_for_projects(path, depth + 1, cat_map, progress);
             }
             return;
         }
@@ -212,7 +222,7 @@ impl Scanner {
                     if measured_paths.contains(&full_path) { continue; }
 
                     let (status, size_bytes, file_count, dir_count, last_modified) =
-                        measure_path(&full_path);
+                        measure_path(&full_path, progress);
 
                     if status == ItemStatus::Found {
                         measured_paths.insert(full_path.clone());
@@ -244,16 +254,17 @@ impl Scanner {
             if !is_dir { continue; }
             if depth == 0 && name.starts_with('.') { continue; }
             if SKIP_DESCENT.contains(&name.as_str()) { continue; }
-            self.walk_for_projects(&path, depth + 1, cat_map);
+            self.walk_for_projects(&path, depth + 1, cat_map, progress);
         }
     }
 }
 
-fn measure_path(path: &Path) -> (ItemStatus, u64, usize, usize, Option<u64>) {
+fn measure_path(path: &Path, progress: &mut impl FnMut(&Path, usize)) -> (ItemStatus, u64, usize, usize, Option<u64>) {
     if !path.exists() {
         return (ItemStatus::Missing, 0, 0, 0, None);
     }
-    let (size_bytes, file_count, dir_count) = calculate_size(path);
+    progress(path, 0);
+    let (size_bytes, file_count, dir_count) = calculate_size(path, |count| progress(path, count));
     let last_modified = path.metadata().ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
@@ -262,13 +273,41 @@ fn measure_path(path: &Path) -> (ItemStatus, u64, usize, usize, Option<u64>) {
 }
 
 fn canonical_name(dir: &Path) -> String {
-    dir.file_name()
+    let folder = dir.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| {
             std::fs::canonicalize(dir).ok()
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
                 .unwrap_or_else(|| dir.display().to_string())
-        })
+        });
+    if folder.eq_ignore_ascii_case("app") {
+        if let Ok(content) = std::fs::read_to_string(dir.join("package.json")) {
+            if let Ok(package) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(name) = package.get("name").and_then(|name| name.as_str())
+                    .filter(|name| !name.is_empty() && !name.chars().any(char::is_control) && *name != "app") {
+                    return format!("{} (app)", name);
+                }
+            }
+        }
+    }
+    folder
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_name;
+
+    #[test]
+    fn distinguishes_app_folders_by_package_name() {
+        let root = std::env::temp_dir().join(format!("scrub-app-names-{}", std::process::id()));
+        for name in ["grapevine", "paperboy"] {
+            let app = root.join(name).join("app");
+            std::fs::create_dir_all(&app).unwrap();
+            std::fs::write(app.join("package.json"), format!(r#"{{"name":"{}"}}"#, name)).unwrap();
+            assert_eq!(canonical_name(&app), format!("{} (app)", name));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn dir_last_modified(dir: &Path) -> Option<u64> {
